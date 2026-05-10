@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 데이터/캐시
+*.csv
+*.parquet
+*.db
+*.sqlite
+cache/
+data/
+
+# 로그
+*.log
+
+# 환경변수
+.env
+.env.local
