@@ -854,35 +854,111 @@ def render_market_indices():
 # ============================================================
 # 데이터: 종목 리스트 (FDR + 시총 정렬)
 # ============================================================
+def _fetch_ticker_list_naver(market):
+    """네이버 모바일 marketValue API로 시총 정렬 종목 리스트.
+
+    한국 외 IP(예: Streamlit Cloud)에서 KRX data API가 차단된 경우의 fallback.
+    네이버는 우선주/리츠/펀드까지 포함하지만 시총 상위 N으로 자르면 사실상 보통주 위주.
+    """
+    rows = []
+    rank = 0
+    for page in range(1, 50):  # 안전 한도 (max 5000개)
+        try:
+            r = requests.get(
+                f"https://m.stock.naver.com/api/stocks/marketValue/{market}",
+                params={"page": page, "pageSize": 100},
+                headers=NAVER_UA, timeout=10,
+            )
+            if not r.ok:
+                break
+            data = r.json()
+        except Exception:
+            break
+        stocks = data.get("stocks") or []
+        if not stocks:
+            break
+        for s in stocks:
+            rank += 1
+            marcap_raw = s.get("marketValueRaw") or s.get("marketValue") or "0"
+            if isinstance(marcap_raw, str):
+                marcap_raw = marcap_raw.replace(",", "")
+            try:
+                marcap_int = int(float(marcap_raw))
+            except (ValueError, TypeError):
+                marcap_int = 0
+            rows.append({
+                "code": str(s.get("itemCode", "")).zfill(6),
+                "name": s.get("stockName", ""),
+                "market": market,
+                "marcap": marcap_int,
+                "rank": rank,
+            })
+        total = data.get("totalCount", 0)
+        if rank >= total or len(stocks) < 100:
+            break
+    return rows
+
+
+def _fetch_ticker_list_fdr(market):
+    """FinanceDataReader로 종목 리스트 (한국 IP에서 빠름)."""
+    df = fdr.StockListing(market)
+    if df is None or len(df) == 0:
+        return []
+    if "Marcap" in df.columns:
+        df = df.sort_values("Marcap", ascending=False, na_position="last").reset_index(drop=True)
+    df = df.copy()
+    df["_rank"] = range(1, len(df) + 1)
+    rows = []
+    for _, r in df.iterrows():
+        marcap = r.get("Marcap")
+        rows.append({
+            "code": str(r["Code"]).zfill(6),
+            "name": r.get("Name", ""),
+            "market": market,
+            "marcap": int(marcap) if pd.notna(marcap) else 0,
+            "rank": int(r["_rank"]),
+        })
+    return rows
+
+
 @st.cache_data(ttl=3600)
 def get_ticker_list(markets, top_n_per_market=None):
-    """종목 리스트 + 시가총액 상위 N개 필터링 (FinanceDataReader 사용)."""
+    """종목 리스트 + 시가총액 상위 N개 필터링.
+
+    1차 시도: FinanceDataReader (KRX data API — 한국 IP에서 빠름)
+    2차 fallback: 네이버 모바일 stock JSON (Streamlit Cloud 등 한국 외 IP에서 안정)
+    """
     top_n_per_market = top_n_per_market or {}
     rows = []
     for m in markets:
+        market_rows = []
+        fdr_err = None
         try:
-            df = fdr.StockListing(m)
-            if df is None or len(df) == 0:
-                st.warning(f"{m} 종목 리스트가 비어 있습니다.")
-                continue
-            if "Marcap" in df.columns:
-                df = df.sort_values("Marcap", ascending=False, na_position="last").reset_index(drop=True)
-            df = df.copy()
-            df["_rank"] = range(1, len(df) + 1)
-            limit = top_n_per_market.get(m)
-            if limit:
-                df = df.head(limit)
-            for _, r in df.iterrows():
-                marcap = r.get("Marcap")
-                rows.append({
-                    "code": str(r["Code"]).zfill(6),
-                    "name": r.get("Name", ""),
-                    "market": m,
-                    "marcap": int(marcap) if pd.notna(marcap) else 0,
-                    "rank": int(r["_rank"]),
-                })
+            market_rows = _fetch_ticker_list_fdr(m)
         except Exception as e:
-            st.warning(f"{m} 종목 리스트 로딩 실패: {e}")
+            fdr_err = e
+
+        if not market_rows:
+            try:
+                market_rows = _fetch_ticker_list_naver(m)
+                if market_rows:
+                    st.info(
+                        f"ℹ️ {m}: FinanceDataReader 실패로 네이버 데이터로 대체했습니다 "
+                        f"(시가총액 상위 정렬, {len(market_rows)}개)."
+                    )
+            except Exception as e:
+                st.warning(f"{m} 종목 리스트 로딩 실패: FDR={fdr_err} / Naver={e}")
+                continue
+
+        if not market_rows:
+            st.warning(f"{m} 종목 리스트가 비어 있습니다.")
+            continue
+
+        limit = top_n_per_market.get(m)
+        if limit:
+            market_rows = market_rows[:limit]
+        rows.extend(market_rows)
+
     return pd.DataFrame(rows)
 
 
